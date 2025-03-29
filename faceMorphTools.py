@@ -93,15 +93,17 @@ class LandmarksFinder:
     @staticmethod
     def checkLandmarks(src_landmarks: np.ndarray, tgt_landmarks: np.ndarray):
         # Trova indici di landmarks duplicati
-        _, unique_indices = np.unique(src_landmarks, axis=0, return_index=True)
-        
-        # Ordina per mantenere l'ordine originale
-        unique_indices = np.sort(unique_indices)
+        _, unique_indices_src= np.unique(src_landmarks, axis=0, return_index=True)
+    
+        #faccio lo stesso per il target
+        _, unique_indices_tgt = np.unique(tgt_landmarks, axis=0, return_index=True)
+
+        #prendo solo i landmark comuni tra i src e i tgt
+        unique_indices = np.intersect1d(unique_indices_src, unique_indices_tgt)
 
         # Filtra entrambi gli array
         return src_landmarks[unique_indices], tgt_landmarks[unique_indices]
-
-
+        
     @staticmethod
     def Triangulation(all_landmarks, img):
         #eseguo la triangolazione di Delaunay
@@ -131,9 +133,10 @@ class LandmarksFinder:
         return tgt_landmarks[src_triangles_index]
 
     @staticmethod
-    def getIntermediateTriangles(src_landmarks, tgt_landmarks, src_triangles, t):
+    def getIntermediateTriangles(src_landmarks, tgt_landmarks, src_triangles_index, t):
         #calcola i triangoli intermedi grazie al valore di t e i triangoli src e tgt
-        return (1 - t) * src_landmarks[src_triangles] + t * tgt_landmarks[src_triangles]
+        #passando gli indici dei triangoli src garantisco che l'operazione venga eseguita per ogni triangolo
+        return (1 - t) * src_landmarks[src_triangles_index] + t * tgt_landmarks[src_triangles_index]
         
 
 
@@ -153,14 +156,15 @@ class AffineTrasform:
             startTriangle = src_triangles_coords[tr].astype(np.float32)
             finalTriangle = intermediate_triangles[tr].astype(np.float32)
             affine_src_to_int = cv2.getAffineTransform(startTriangle, finalTriangle)
-            
+            affine_src_to_int = np.vstack([affine_src_to_int, [0, 0, 1]])
+
             #inverto per fare l'inverse mapping
             inv_affine_src_to_int = np.linalg.inv(
-                np.vstack([affine_src_to_int, [0, 0, 1]])
+                affine_src_to_int
             )
             # individuo i punti interni al triangolo intermedio
             mask = np.zeros(target_shape, dtype=np.uint8)
-            cv2.fillConvexPoly(mask, finalTriangle.astype(np.int32), 1)
+            cv2.fillConvexPoly(mask, np.round(finalTriangle).astype(np.int32), 1)
             mask = mask.astype(np.bool_)
             # divido le coordinate (prima le colonne-x, dopo le righe-y)
             y_triangle, x_triangle = np.where(mask)
