@@ -1,4 +1,5 @@
 import cv2
+import cv2.data
 import numpy as np
 import dlib
 
@@ -7,15 +8,16 @@ class ImgPrepare:
         face = self.detectFace(img)
         #ritorna None se non è stato individuato il volto
         if face is None:
-            return (None ,None)
+            return None
         return self.centerAndScale(img, face)
 
     def detectFace(self, img):
         #porta in scala di grigio per una migliore classificazione
         gray_scale_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        face_detector = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+
+        face_detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt.xml")
         faces = face_detector.detectMultiScale(
-            gray_scale_img, scaleFactor=1.2, minNeighbors=9
+            gray_scale_img, scaleFactor=1.1, minNeighbors=9
         )
         
         #prende il volto più grande identificato per evitare falsi positivi
@@ -39,13 +41,8 @@ class ImgPrepare:
 
             M_affine = np.array([[1, 0, tx], [0, 1, ty]]).astype(np.float32)
             img = cv2.warpAffine(img, M_affine, dsize=(img.shape[1], img.shape[0]))
-            #aggiorna le coordinate del volto con la traslazione
-            face_coords = np.array(
-                [[face[0]+tx, face[1]+ty, 1], [face[0] + width+tx, face[1] + height+ty, 1]],
-                dtype=np.float32,
-            ).T
-
-            #scala in base all'altezza del volto individuata (50% dell'altezza dell'immagine)
+         
+            #scala in base all'altezza del volto individuata (55% dell'altezza dell'immagine)
             target_height = 0.50 * img.shape[0]
             scale = target_height / height
 
@@ -53,30 +50,28 @@ class ImgPrepare:
     
             img = cv2.warpAffine(img, M_affine, dsize=(img.shape[1], img.shape[0]))
 
-            real_affine = np.vstack([M_affine, [0, 0, 1]])
+            return img
 
-            #trasforma le coordinate del volto in quelle scalate 
-            transformed_coords = real_affine @ face_coords
-            face_coords = np.round(transformed_coords[:2].T.reshape(4,)).astype(np.int32)
-
-            return img, face_coords
-        else:
-            return None
 
 
 class LandmarksFinder:
 
     @staticmethod
-    def findLandmarks(img, face):
+    def findLandmarks(img):
         #rileva i landmarks del volto con dlib
-        face = dlib.rectangle(left=face[0], top=face[1], right=face[2], bottom=face[3])
+        #rileva nuovamente il volto per evitare errori del Cascade Classifier
+        face_detector = dlib.get_frontal_face_detector()
+        faces = face_detector(img, 1)
+    
         landmarks_detector = dlib.shape_predictor(
             "shape_predictor_68_face_landmarks.dat"
         )
-        landmarks = landmarks_detector(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), face)
+
+        landmarks = landmarks_detector(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), faces[0])
         landmarks = np.array(
             [(landmarks.part(n).x, landmarks.part(n).y) for n in range(68)], np.float32
         )
+
         #aggiungo punti extra per migliore stabilità
         extra_points = [
             (0, 0),
@@ -131,15 +126,14 @@ class LandmarksFinder:
         #trova i triangoli target con quelli corrispondenti del src
         #sfruttando gli indici dei landmarks
         return tgt_landmarks[src_triangles_index]
-
+    
     @staticmethod
     def getIntermediateTriangles(src_landmarks, tgt_landmarks, src_triangles_index, t):
         #calcola i triangoli intermedi grazie al valore di t e i triangoli src e tgt
         #passando gli indici dei triangoli src garantisco che l'operazione venga eseguita per ogni triangolo
         return (1 - t) * src_landmarks[src_triangles_index] + t * tgt_landmarks[src_triangles_index]
         
-
-
+        
 class AffineTrasform:
     @staticmethod
     def getIntermediateImg(img_src, intermediate_triangles, src_triangles_coords):
@@ -155,13 +149,18 @@ class AffineTrasform:
             # calcolo la trasformazione affine
             startTriangle = src_triangles_coords[tr].astype(np.float32)
             finalTriangle = intermediate_triangles[tr].astype(np.float32)
+
             affine_src_to_int = cv2.getAffineTransform(startTriangle, finalTriangle)
             affine_src_to_int = np.vstack([affine_src_to_int, [0, 0, 1]])
 
-            #inverto per fare l'inverse mapping
-            inv_affine_src_to_int = np.linalg.inv(
-                affine_src_to_int
-            )
+            #inverto per fare l'inverse mapping ma definisco l'inversa come l'identità per evitare problemi di matrice singolare
+            inv_affine_src_to_int = np.eye(3, 3)
+
+            try:
+                inv_affine_src_to_int = np.linalg.inv(affine_src_to_int)
+            except np.linalg.LinAlgError:
+                print(startTriangle, finalTriangle, sep="\n")
+                
             # individuo i punti interni al triangolo intermedio
             mask = np.zeros(target_shape, dtype=np.uint8)
             cv2.fillConvexPoly(mask, np.round(finalTriangle).astype(np.int32), 1)
@@ -176,5 +175,15 @@ class AffineTrasform:
             # assegna le coordinate dei punti iniziali nelle mappe dell'immagine finale
             map_x[y_triangle, x_triangle] = src_x
             map_y[y_triangle, x_triangle] = src_y
+
+
+        h, w = img_src.shape[:2]
+        #individuo gli indici delle posizioni nella nuova immagine che sono state mappate fuori dall'immagine originale
+        wrong_mapped_mask = (map_x < 0) | (map_x >= w) | (map_y < 0) | (map_y >= h)
+        #creo una meshgrid per recuperare le coordinate dei punti nell'immagine iniziali
+        original_map_x, original_map_y = np.meshgrid(np.arange(0, w, 1), np.arange(0, h, 1))
+        #assegno alle coordinate mappate in modo errato le coordinate dell'immagine originale 
+        map_x[wrong_mapped_mask] = original_map_x[wrong_mapped_mask]
+        map_y[wrong_mapped_mask] = original_map_y[wrong_mapped_mask]
 
         return cv2.remap(img_src, map_x, map_y, interpolation=cv2.INTER_LINEAR)
